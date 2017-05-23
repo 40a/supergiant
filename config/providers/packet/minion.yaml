@@ -31,6 +31,12 @@ write_files:
       rm -r /opt/bin/bin/
       rm -f "/opt/bin/cni.tar.gz"
 
+      cd /root
+      git clone https://github.com/packethost/packet-block-storage.git
+      cd packet-block-storage
+      chmod 755 ./*
+      ./packet-block-storage-attach
+
       cd /tmp
       wget https://github.com/digitalocean/doctl/releases/download/v1.4.0/doctl-1.4.0-linux-amd64.tar.gz
       tar xf /tmp/doctl-1.4.0-linux-amd64.tar.gz
@@ -129,8 +135,8 @@ coreos:
         Description=Kubernetes Kubelet
         [Service]
         Environment=KUBELET_VERSION=v{{ .Kube.PACKConfig.KubernetesVersion }}_coreos.0
-        Environment="RKT_RUN_ARGS=--volume=resolv,kind=host,source=/etc/resolv.conf \
-          --mount volume=resolv,target=/etc/resolv.conf \
+        Environment="RKT_RUN_ARGS=--volume iscsiadm,kind=host,source=/usr/sbin/iscsiadm \
+          --mount volume=iscsiadm,target=/usr/sbin/iscsiadm \
           --uuid-file-save=/var/run/kubelet-pod.uuid"
         ExecStartPre=-/usr/bin/rkt rm --uuid-file=/var/run/kubelet-pod.uuid
         ExecStartPre=/bin/bash -c "/opt/bin/download-k8s-binary kubelet"
