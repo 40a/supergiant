@@ -59,6 +59,7 @@ func (p *Provider) CreateKube(m *model.Kube, action *core.Action) error {
 			if err != nil {
 				return err
 			}
+			m.PACKConfig.ProjectID = project
 			plan, err := getPlan(m, client, m.MasterNodeSize)
 			if err != nil {
 				return err

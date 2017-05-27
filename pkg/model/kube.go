@@ -131,8 +131,9 @@ type GCEKubeConfig struct {
 }
 
 type PACKKubeConfig struct {
-	Project  string `json:"project" validate:"nonzero"`
-	Facility string `json:"facility" validate:"nonzero"`
+	Project   string `json:"project" validate:"nonzero"`
+	ProjectID string `json:"project_id" sg:"readonly"`
+	Facility  string `json:"facility" validate:"nonzero"`
 
 	MasterNodes      []string `json:"master_nodes" sg:"readonly"`
 	MasterName       string   `json:"master_name" sg:"readonly"`

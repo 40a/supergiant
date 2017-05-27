@@ -51,8 +51,17 @@ func (p *Provider) CreateNode(m *model.Node, action *core.Action) error {
 		if err != nil {
 			return err
 		}
+
+		data := struct {
+			*model.Node
+			Token string
+		}{
+			m,
+			m.Kube.CloudAccount.Credentials["api_token"],
+		}
+
 		var masterUserdata bytes.Buffer
-		if err = masterTemplate.Execute(&masterUserdata, m); err != nil {
+		if err = masterTemplate.Execute(&masterUserdata, data); err != nil {
 			return err
 		}
 		userData := string(masterUserdata.Bytes())

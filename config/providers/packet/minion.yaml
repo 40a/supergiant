@@ -31,16 +31,249 @@ write_files:
       rm -r /opt/bin/bin/
       rm -f "/opt/bin/cni.tar.gz"
 
-      cd /root
+      cd /opt/bin/
       git clone https://github.com/packethost/packet-block-storage.git
       cd packet-block-storage
       chmod 755 ./*
-      ./packet-block-storage-attach
+      /opt/bin/packet-block-storage/packet-block-storage-attach
 
       cd /tmp
       wget https://github.com/digitalocean/doctl/releases/download/v1.4.0/doctl-1.4.0-linux-amd64.tar.gz
       tar xf /tmp/doctl-1.4.0-linux-amd64.tar.gz
       sudo mv /tmp/doctl /opt/bin/
+  - path: "/etc/kubernetes/volumeplugins/supergiant.io~packet/packet"
+    permissions: "0755"
+    owner: "root"
+    content: |
+      #!/bin/bash
+
+      ## Required Flex Volume Options.
+      ##{
+      ##  "volumeID": "bar",
+      ##  "name": "foo"
+      ##}
+
+      ## CoreOS Kube-Wrapper setup
+      mount -o remount,ro /sys/fs/selinux >/dev/null 2>&1
+      export PATH=$PATH:/usr/local/sbin/
+      apt-get update >/dev/null 2>&1
+      apt-get install -y curl jq >/dev/null 2>&1
+      mount -o remount,rw /sys/fs/selinux >/dev/null 2>&1
+      export PATH=$PATH:.
+
+      ## Where am I
+      FACILITY=$(curl -s https://metadata.packet.net/metadata | jq -r .facility)
+      INST_ID=$(curl -s https://metadata.packet.net/metadata | jq -r .id)
+      TOKEN="{{ .Token }}"
+      PROJECT="{{ .Kube.PACKConfig.ProjectID }}"
+
+      ## Usage
+      usage() {
+        err "Invalid usage. Usage: "
+        err "\t$0 init"
+        err "\t$0 attach <json params>"
+        err "\t$0 detach <mount device>"
+        err "\t$0 mount <mount dir> <mount device> <json params>"
+        err "\t$0 unmount <mount dir>"
+        exit 1
+      }
+
+      err() {
+        echo -ne $* 1>&2
+      }
+
+      log() {
+        echo -ne $* >&1
+      }
+
+      ismounted() {
+        MOUNT=`findmnt -n ${MNTPATH} 2>/dev/null | cut -d' ' -f1`
+        if [ "${MOUNT}" == "${MNTPATH}" ]; then
+          echo "1"
+        else
+          echo "0"
+        fi
+      }
+
+      attach() {
+        VOLUMEDISC=$(echo $1 | jq -r '.name') ## This is actually the volume description
+        PROVISION=$(echo $1 | jq -r '.provision')
+        SIZE=$(echo $1 | jq -r '.size')
+        SLUG=$(echo $1 | jq -r '.slug') ## WE NEED TO CATCH null here... if the json field is blank it is null not "". We should set sensible defaults.
+
+        ## Lets fetch the volumeID and volumeName
+        VOLUMEID=$(curl -X GET --header 'Accept: application/json' --header "X-Auth-Token: ${TOKEN}" 'https://api.packet.net/projects/'"${PROJECT}"'/storage' -s | jq -r '.volumes[] | select(.description == "'${VOLUMEDISC}'") | .id')
+
+        if [ -z "$VOLUMEID" ] && [ "$PROVISION" == "true" ]; then
+
+            FACID=$(curl -X GET --header 'Accept: application/json' --header "X-Auth-Token: ${TOKEN}" 'https://api.packet.net/facilities' -s | jq -r '.facilities[] | select(.code == "'${FACILITY}'") | .id')
+            PLAN=$(curl -s -X GET --header 'Accept: application/json' --header "X-Auth-Token: ${TOKEN}" 'https://api.packet.net/plans' | jq -r '.plans[] | select(.slug == "'${SLUG}'") | .id')
+            VOLUMEID=$(curl -s -H "Content-Type: application/json" --header "X-Auth-Token: ${TOKEN}" -X POST -d '{"size":'${SIZE}',"billing_cycle":"hourly","project_id":"'${PROJECT}'","plan_id":"'${PLAN}'","facility_id":"'${FACID}'","description":"'${VOLUMEDISC}'"}' 'https://api.packet.net/projects/'${PROJECT}'/storage' -s | jq -r .id)
+
+            n=0
+            STATUS="foo"
+            until [ $n -ge 100 ] || [ $STATUS == "active" ]
+              do
+                STATUS=$(curl -X GET --header 'Accept: application/json' --header "X-Auth-Token: ${TOKEN}" 'https://api.packet.net/storage/12fc50cd-dd15-482b-b7fc-9486cc30ccf1' -s | jq -r .state)
+                n=$[$n+1]
+                sleep 5
+              done
+        fi
+
+        VOLUMEID=$(curl -X GET --header 'Accept: application/json' --header "X-Auth-Token: ${TOKEN}" 'https://api.packet.net/projects/'"${PROJECT}"'/storage' -s | jq -r '.volumes[] | select(.description == "'${VOLUMEDISC}'") | .id')
+        if [ -z "$VOLUMEID" ]
+        then
+          err "{\"status\": \"Failure\", \"message\": \"Volume ${VOLUMEDISC} does not exist, or is unable to be created.\"}"
+          exit 1
+        fi
+
+        VOLUME_NAME=$(curl -X GET --header 'Accept: application/json' --header "X-Auth-Token: ${TOKEN}" 'https://api.packet.net/projects/'"${PROJECT}"'/storage' -s | jq -r '.volumes[] | select(.description == "'${VOLUMEDISC}'") | .name')
+
+        ## Lets attach the volume
+        resp=$(curl -s -H "Content-Type: application/json" --header "X-Auth-Token: ${TOKEN}" -X POST -d '{"device_id": "'${INST_ID}'"}' 'https://api.packet.net/storage/'${VOLUMEID}'/attachments')
+
+        ## Lets fetch our local attach info
+        iqn=$(curl -s http://metadata.packet.net/metadata | jq -r '.volumes[] | select(.name == "'${VOLUME_NAME}'") | .iqn')
+        ip=$(curl -s http://metadata.packet.net/metadata | jq -r '.volumes[] | select(.name == "'${VOLUME_NAME}'") | .ips[0]')
+
+        ## Lets run the iscsi config
+        /opt/bin/packet-block-storage/packet-block-storage-attach $VOLUME_NAME >/dev/null 2>&1
+
+        # Find the new volume.
+        DEVNAME="/dev/disk/dev/disk/by-path/$(ls /dev/disk/by-path/ | grep ${ip}| grep ${iqn})"
+
+        # Wait for attach
+        NEXT_WAIT_TIME=1
+        until ls -l $DEVNAME >/dev/null 2>&1 || [ $NEXT_WAIT_TIME -eq 4 ]; do
+         sleep $(( NEXT_WAIT_TIME++ ))
+        done
+
+        #Record the actual device name.
+        DVSHRTNAME=$(ls -l /dev/disk/by-path/ | grep ${ip}| grep ${iqn} | awk '{print $11}' | sed 's/\.\.\///g' | sed '/^\s*$/d')
+        DMDEV="/dev/mapper/$(cat /etc/multipath/bindings | grep ${VOLUME_NAME} | awk '{print $2}')"
+        # Error check.
+        if [ ! -b "${DMDEV}" ]; then
+          err "{\"status\": \"Failure\", \"message\": \"Volume ${DMDEV} does not exist\"}"
+          exit 1
+        fi
+        log "{\"status\": \"Success\", \"device\":\"${DMDEV}\"}"
+        exit 0
+      }
+
+      detach() {
+        # This is nasty, I would prefer to use doctl for detach as well... but it appears that it is bugged.
+        # I will update this when a new version of doctl releases. For now raw api.
+        SRTDEVNAME=$(echo $1 | sed 's/\/dev\/mapper\///')
+        VOLNAME=$(cat /etc/multipath/bindings | grep ${SRTDEVNAME} | awk '{print $1}')
+        VOLUMEID=$(curl -X GET --header 'Accept: application/json' --header "X-Auth-Token: ${TOKEN}" 'https://api.packet.net/projects/'"${PROJECT}"'/storage' -s | jq -r '.volumes[] | select(.name == "'${VOLNAME}'") | .id')
+        ATTACHID=$(curl -X GET --header 'Accept: application/json' --header "X-Auth-Token: ${TOKEN}" 'https://api.packet.net/storage/'"${VOLUMEID}"'/attachments' -s | jq -r .attachments[0].id)
+
+        /opt/bin/packet-block-storage/packet-block-storage-detach $VOLNAME >/dev/null 2>&1
+
+        n=0
+        RESP="foo"
+
+        until [ $n -ge 300 ] || [ -z "$RESP" ]
+          do
+            RESP=$(curl -s -H "Content-Type: application/json" --header "X-Auth-Token: ${TOKEN}" -X DELETE 'https://api.packet.net/storage/attachments/'${ATTACHID}'' | jq -r .errors[0])
+            n=$[$n+1]
+            sleep 5
+          done
+
+        if [ -z "$RESP" ]; then
+          log "{\"status\": \"Success\"}"
+          exit 0
+        fi
+        err "{\"status\": \"Failure\", \"message\": \"Unable to detach volume: ${VOLNAME}\"}"
+        exit 1
+      }
+
+      domount() {
+        MNTPATH=$1
+        DMDEV=$2
+        FSTYPE=$(echo $3|jq -r '.["kubernetes.io/fsType"]')
+
+
+
+        if [ ! -b "${DMDEV}" ]; then
+          err "{\"status\": \"Failure\", \"message\": \"${DMDEV} does not exist\"}"
+          exit 1
+        fi
+
+        if [ $(ismounted) -eq 1 ] ; then
+          log "{\"status\": \"Success\"}"
+          exit 0
+        fi
+
+        VOLFSTYPE=`blkid -o udev ${DMDEV} 2>/dev/null|grep "ID_FS_TYPE"|cut -d"=" -f2`
+        if [ "${VOLFSTYPE}" == "" ]; then
+          mkfs -t ${FSTYPE} ${DMDEV} >/dev/null 2>&1
+          if [ $? -ne 0 ]; then
+            err "{ \"status\": \"Failure\", \"message\": \"Failed to create fs ${FSTYPE} on device ${DMDEV}\"}"
+            exit 1
+          fi
+        fi
+
+        mkdir -p ${MNTPATH} &> /dev/null
+
+        mount ${DMDEV} ${MNTPATH} &> /dev/null
+        if [ $? -ne 0 ]; then
+          err "{ \"status\": \"Failure\", \"message\": \"Failed to mount device ${DMDEV} at ${MNTPATH}\"}"
+          exit 1
+        fi
+        log "{\"status\": \"Success\"}"
+        exit 0
+      }
+
+      unmount() {
+        MNTPATH=$1
+        if [ $(ismounted) -eq 0 ] ; then
+          log "{\"status\": \"Success\"}"
+          exit 0
+        fi
+
+        umount ${MNTPATH} &> /dev/null
+        if [ $? -ne 0 ]; then
+          err "{ \"status\": \"Failed\", \"message\": \"Failed to unmount volume at ${MNTPATH}\"}"
+          exit 1
+        fi
+        rmdir ${MNTPATH} &> /dev/null
+
+        log "{\"status\": \"Success\"}"
+        exit 0
+      }
+
+      op=$1
+
+      if [ "$op" = "init" ]; then
+        log "{\"status\": \"Success\"}"
+        exit 0
+      fi
+
+      if [ $# -lt 2 ]; then
+        usage
+      fi
+
+      shift
+
+      case "$op" in
+        attach)
+          attach $*
+          ;;
+        detach)
+          detach $*
+          ;;
+        mount)
+          domount $*
+          ;;
+        unmount)
+          unmount $*
+          ;;
+        *)
+          usage
+      esac
+
+      exit 1
   - path: "/etc/kubernetes/manifests/kube-proxy.yaml"
     permissions: "0644"
     owner: "root"
@@ -127,6 +360,9 @@ coreos:
             [Unit]
             Requires=flanneld.service
             After=flanneld.service
+    - name: iscsid.service
+      enable: true
+      command: start
     - name: kubelet.service
       command: start
       content: |
@@ -137,6 +373,8 @@ coreos:
         Environment=KUBELET_VERSION=v{{ .Kube.PACKConfig.KubernetesVersion }}_coreos.0
         Environment="RKT_RUN_ARGS=--volume iscsiadm,kind=host,source=/usr/sbin/iscsiadm \
           --mount volume=iscsiadm,target=/usr/sbin/iscsiadm \
+          --volume multipath,kind=host,source=/etc/multipath/ \
+          --mount volume=multipath,target=/etc/multipath/ \
           --uuid-file-save=/var/run/kubelet-pod.uuid"
         ExecStartPre=-/usr/bin/rkt rm --uuid-file=/var/run/kubelet-pod.uuid
         ExecStartPre=/bin/bash -c "/opt/bin/download-k8s-binary kubelet"
