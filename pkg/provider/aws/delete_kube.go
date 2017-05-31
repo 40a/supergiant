@@ -78,7 +78,7 @@ func (p *Provider) DeleteKube(m *model.Kube, action *core.Action) error {
 	})
 
 	procedure.AddStep("disassociating Route Table from Subnet(s)", func() error {
-		if len(m.AWSConfig.RouteTableSubnetAssociationID) == 0 {
+		if len(m.AWSConfig.RouteTableSubnetAssociationID) == 0 || m.AWSConfig.VPCMANAGED == true {
 			return nil
 		}
 
@@ -136,7 +136,7 @@ func (p *Provider) DeleteKube(m *model.Kube, action *core.Action) error {
 	})
 
 	procedure.AddStep("deleting Route Table", func() error {
-		if m.AWSConfig.RouteTableID == "" {
+		if m.AWSConfig.RouteTableID == "" || m.AWSConfig.VPCMANAGED == true {
 			return nil
 		}
 		input := &ec2.DeleteRouteTableInput{
