@@ -118,7 +118,7 @@ func (p *Provider) CreateKube(m *model.Kube, action *core.Action) error {
       "Effect": "Allow",
       "Action": "s3:*",
       "Resource": [
-        "arn:aws:s3:::kubernetes-*"
+        "*"
       ]
     }
   ]
@@ -152,7 +152,7 @@ func (p *Provider) CreateKube(m *model.Kube, action *core.Action) error {
       "Effect": "Allow",
       "Action": "s3:*",
       "Resource": [
-        "arn:aws:s3:::kubernetes-*"
+        "*"
       ]
     },
     {
